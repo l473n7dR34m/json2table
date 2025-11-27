@@ -1,0 +1,240 @@
+#!/usr/bin/env python3
+"""
+json2table – Convert JSON arrays of objects into plain aligned tables, Markdown, or CSV.
+
+Default output:
+  Plain aligned table (useful for quick inspection in a terminal).
+"""
+
+import sys
+import json
+import argparse
+import csv
+from typing import List, Dict, Any
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Convert JSON arrays of objects into aligned tables, Markdown, or CSV."
+    )
+    parser.add_argument(
+        "file",
+        nargs="?",
+        help="Path to JSON file (if omitted, reads from stdin).",
+    )
+    parser.add_argument(
+        "-f",
+        "--fields",
+        help="Comma separated list of fields to include (in order).",
+    )
+    parser.add_argument(
+        "-H",
+        "--no-header",
+        action="store_true",
+        help="Omit header row.",
+    )
+    parser.add_argument(
+        "--flatten",
+        action="store_true",
+        help="Flatten nested objects into dot.notation columns.",
+    )
+    parser.add_argument(
+        "--md",
+        action="store_true",
+        help="Output Markdown table instead of plain aligned table.",
+    )
+    parser.add_argument(
+        "--csv",
+        action="store_true",
+        help="Output CSV instead of a table.",
+    )
+    parser.add_argument(
+        "--sort",
+        help="Sort rows by this field.",
+    )
+    parser.add_argument(
+        "--desc",
+        action="store_true",
+        help="Sort in descending order instead of ascending.",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        help="Limit the number of rows shown.",
+    )
+    return parser.parse_args()
+
+
+def read_json_from_stdin() -> Any:
+    data = sys.stdin.read()
+    if not data.strip():
+        raise ValueError("No input received on stdin.")
+    return json.loads(data)
+
+
+def read_json_from_file(path: str) -> Any:
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def to_list_of_dicts(obj: Any) -> List[Dict[str, Any]]:
+    if isinstance(obj, list):
+        if all(isinstance(x, dict) for x in obj):
+            return obj
+        raise TypeError("Top-level JSON must be a list of objects.")
+    if isinstance(obj, dict):
+        return [obj]
+    raise TypeError("Top-level JSON must be an object or list of objects.")
+
+
+def flatten_dict(d: Dict[str, Any], parent_key: str = "", sep: str = ".") -> Dict[str, Any]:
+    items: Dict[str, Any] = {}
+    for k, v in d.items():
+        new_key = f"{parent_key}{sep}{k}" if parent_key else k
+        if isinstance(v, dict):
+            items.update(flatten_dict(v, new_key, sep=sep))
+        else:
+            items[new_key] = v
+    return items
+
+
+def infer_fields(rows: List[Dict[str, Any]]) -> List[str]:
+    fields: List[str] = []
+    seen = set()
+    for row in rows:
+        for key in row.keys():
+            if key not in seen:
+                seen.add(key)
+                fields.append(key)
+    return fields
+
+
+def escape_markdown(value: str) -> str:
+    value = value.replace("|", r"\|")
+    value = value.replace("\n", "<br>")
+    return value
+
+
+def format_value(value: Any, markdown_escape: bool = True) -> str:
+    if value is None:
+        s = ""
+    elif isinstance(value, (dict, list)):
+        s = json.dumps(value, ensure_ascii=False)
+    else:
+        s = str(value)
+    return escape_markdown(s) if markdown_escape else s
+
+
+def rows_to_markdown(rows: List[Dict[str, Any]], fields: List[str], include_header: bool) -> str:
+    lines = []
+
+    if include_header:
+        header = "| " + " | ".join(fields) + " |"
+        sep = "| " + " | ".join("---" for _ in fields) + " |"
+        lines.append(header)
+        lines.append(sep)
+
+    for row in rows:
+        cells = [format_value(row.get(field, ""), markdown_escape=True) for field in fields]
+        line = "| " + " | ".join(cells) + " |"
+        lines.append(line)
+
+    return "\n".join(lines)
+
+
+def rows_to_plain_table(rows: List[Dict[str, Any]], fields: List[str], include_header: bool) -> str:
+    matrix: List[List[str]] = []
+
+    if include_header:
+        matrix.append([str(f) for f in fields])
+
+    for row in rows:
+        matrix.append([format_value(row.get(field, ""), markdown_escape=False) for field in fields])
+
+    if not matrix:
+        return ""
+
+    num_cols = len(fields)
+    col_widths = [0] * num_cols
+
+    for r in matrix:
+        for i, cell in enumerate(r):
+            col_widths[i] = max(col_widths[i], len(cell))
+
+    lines: List[str] = []
+    for idx, r in enumerate(matrix):
+        padded_cells = [r[i].ljust(col_widths[i]) for i in range(num_cols)]
+        line = " | ".join(padded_cells)
+        lines.append(line)
+
+        if include_header and idx == 0:
+            sep = "-+-".join("-" * col_widths[i] for i in range(num_cols))
+            lines.append(sep)
+
+    return "\n".join(lines)
+
+
+def rows_to_csv(rows: List[Dict[str, Any]], fields: List[str], include_header: bool) -> str:
+    from io import StringIO
+
+    output = StringIO()
+    writer = csv.writer(output)
+
+    if include_header:
+        writer.writerow(fields)
+
+    for row in rows:
+        writer.writerow([format_value(row.get(field, ""), markdown_escape=False) for field in fields])
+
+    return output.getvalue().rstrip("\n")
+
+
+def main() -> None:
+    args = parse_args()
+
+    try:
+        data = read_json_from_file(args.file) if args.file else read_json_from_stdin()
+    except Exception as e:
+        print(f"Error reading JSON: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        rows = to_list_of_dicts(data)
+    except Exception as e:
+        print(f"Invalid JSON structure: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if args.flatten:
+        rows = [flatten_dict(r) for r in rows]
+
+    if args.sort:
+        try:
+            rows = sorted(rows, key=lambda r: r.get(args.sort), reverse=args.desc)
+        except Exception as e:
+            print(f"Sort failed: {e}", file=sys.stderr)
+
+    if args.limit is not None:
+        rows = rows[: args.limit]
+
+    if not rows:
+        sys.exit(0)
+
+    if args.fields:
+        fields = [f.strip() for f in args.fields.split(",") if f.strip()]
+    else:
+        fields = infer_fields(rows)
+
+    include_header = not args.no_header
+
+    if args.csv:
+        output = rows_to_csv(rows, fields, include_header)
+    elif args.md:
+        output = rows_to_markdown(rows, fields, include_header)
+    else:
+        output = rows_to_plain_table(rows, fields, include_header)
+
+    print(output)
+
+
+if __name__ == "__main__":
+    main()
